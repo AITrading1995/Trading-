@@ -1,4 +1,4 @@
-from tvdatafeed import TvDatafeed, Interval # Assuming Interval is needed based on original code's multi_symbol
+from tvDatafeed import TvDatafeed, Interval # Assuming Interval is needed based on original code's multi_symbol
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
