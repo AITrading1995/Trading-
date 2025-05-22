@@ -125,6 +125,52 @@ if backtest_results:
     # This will display the equity curve and price chart with trades.
 ```
 
+#### Stop Loss and Take Profit
+
+The `backtest` method now supports percentage-based Stop Loss (SL) and Take Profit (TP) levels.
+
+```python
+# Updated backtest method signature snippet:
+# def backtest(self, ..., sl_percentage=None, tp_percentage=None):
+```
+
+*   **`sl_percentage` (float, optional)**: The percentage below the entry price at which to set the Stop Loss. For example, `0.02` means a 2% SL. If `None` or `0`, no SL is used.
+*   **`tp_percentage` (float, optional)**: The percentage above the entry price at which to set the Take Profit. For example, `0.04` means a 4% TP. If `None` or `0`, no TP is used.
+
+**Behavior:**
+
+*   **Calculation**: For long trades, SL price is `entry_price * (1 - sl_percentage)` and TP price is `entry_price * (1 + tp_percentage)`. (Functionality currently focuses on long trades).
+*   **Monitoring**: On each bar after a trade is opened, the system checks if the bar's `low` price has breached the `sl_price` or if the bar's `high` price has breached the `tp_price`.
+*   **Execution (Simplified)**: If an SL or TP level is breached, the trade is assumed to be exited at that exact SL/TP price during that bar.
+*   **Precedence**:
+    *   Stop Loss is checked before Take Profit if both conditions could be met on the same bar by its high/low range.
+    *   SL/TP conditions are checked and executed *before* evaluating strategy-generated exit signals for the same bar. If an SL/TP exit occurs, the strategy's signal to exit on that bar is ignored for that trade.
+*   **Logging**: The `trade_log` (and consequently the summary report) will indicate if a trade was closed due to 'SL', 'TP', or 'Signal' via the `exit_reason` field.
+
+**Example Usage within `backtest` call:**
+
+```python
+backtest_results = bot.backtest(
+    timeframe=Interval.in_1_hour,
+    strategy_logic=my_strategy,
+    initial_capital=10000.0,
+    bars=1000,
+    commission_bps=2.0,
+    sl_percentage=0.02,  # Set a 2% Stop Loss
+    tp_percentage=0.04   # Set a 4% Take Profit
+)
+```
+
+When using `grid_search_optimize`, `sl_percentage` and `tp_percentage` can be passed as fixed arguments to be used for all backtests within that optimization run:
+```python
+best_params, best_score, all_results = bot.grid_search_optimize(
+    # ... other strategy parameters for the grid ...
+    sl_percentage=0.025, # Fixed SL for all optimization runs
+    tp_percentage=0.05   # Fixed TP for all optimization runs
+)
+```
+It is also possible to include `sl_percentage` and `tp_percentage` in the `parameter_grid` if you wish to optimize these values, but this requires modifying `grid_search_optimize` to handle them as optimizable parameters (currently it treats them as fixed for a run). The current implementation of `grid_search_optimize` passes these as fixed values to `backtest`.
+
 ### Grid Search Optimization for Strategies
 
 The `Bot` class includes a `grid_search_optimize` method to help find the best parameters for your trading strategy based on a chosen performance metric.

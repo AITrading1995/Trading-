@@ -285,6 +285,181 @@ class TestBot(unittest.TestCase):
         self.assertTrue('error' in all_results[0])
         self.assertIn(f'Metric {metric_to_optimize} not found', all_results[0]['error'])
 
+    @patch('bot.Bot.download')
+    def test_backtest_sl_triggered(self, mock_download):
+        # Test scenario where Stop Loss is triggered for a long trade
+        strategy_mock = MagicMock()
+        # Price data: Open high enough, then drops to hit SL
+        # Entry on bar 1 (open=101 based on idx[0] signal), SL set relative to 101.
+        # Bar 2 (idx=2) low goes to 97. SL expected: 101 * (1-0.02) = 98.98.
+        data = { 
+            'open':  [100, 101, 98,  97], 
+            'high':  [102, 102, 99,  98],
+            'low':   [99,  100, 97,  96], # SL hit at 97 on bar index 2 (data_df['low'].iloc[i+1] where i+1 = 2)
+            'close': [101, 100, 97.5, 97],
+            'volume':[1000,1000,1000,1000]
+        }
+        idx = pd.to_datetime([f'2023-01-01 0{i}:00:00' for i in range(len(data['open']))])
+        mock_price_df = pd.DataFrame(data, index=idx)
+        mock_download.return_value = mock_price_df
+
+        # Signal: Buy at index 0, executes at open of index 1 (price 101)
+        signals_data = {'signal': [1, 0, 0, 0]} 
+        mock_signals_df = pd.DataFrame(signals_data, index=idx)
+        strategy_mock.generate_signals.return_value = mock_signals_df
+
+        sl_percentage = 0.02 
+        entry_price_expected = 101 
+        sl_price_expected = entry_price_expected * (1 - sl_percentage) 
+
+        results = self.bot.backtest(
+            timeframe=Interval.in_1_hour, 
+            strategy_logic=strategy_mock,
+            initial_capital=10000,
+            bars=len(mock_price_df),
+            commission_bps=0,
+            sl_percentage=sl_percentage,
+            tp_percentage=None 
+        )
+
+        self.assertIsNotNone(results)
+        self.assertEqual(len(results['trade_log']), 1)
+        trade = results['trade_log'][0]
+        
+        self.assertEqual(trade['entry_price'], entry_price_expected)
+        self.assertEqual(trade['exit_reason'], 'SL')
+        # SL is triggered when low <= sl_price. Assumed execution at sl_price.
+        self.assertAlmostEqual(trade['exit_price'], sl_price_expected) 
+        
+        expected_shares = 10000 / entry_price_expected
+        expected_pnl = (sl_price_expected - entry_price_expected) * expected_shares
+        self.assertAlmostEqual(trade['pnl'], expected_pnl, places=2)
+        self.assertAlmostEqual(results['performance_metrics']['final_equity'], 10000 + expected_pnl, places=2)
+
+    @patch('bot.Bot.download')
+    def test_backtest_tp_triggered(self, mock_download):
+        strategy_mock = MagicMock()
+        # Entry at open of index 1 (price 99). TP expected: 99 * (1+0.02) = 100.98.
+        # Bar 2 (idx=2) high goes to 103.
+        data = { 
+            'open':  [100, 99,  101, 100], 
+            'high':  [101, 100, 103, 101], # TP hit at 103 on bar index 2
+            'low':   [99,  98,  100, 99],
+            'close': [100, 99.5,102, 100.5],
+            'volume':[1000,1000,1000,1000]
+        }
+        idx = pd.to_datetime([f'2023-01-01 0{i}:00:00' for i in range(len(data['open']))])
+        mock_price_df = pd.DataFrame(data, index=idx)
+        mock_download.return_value = mock_price_df
+
+        signals_data = {'signal': [1, 0, 0, 0]} 
+        mock_signals_df = pd.DataFrame(signals_data, index=idx)
+        strategy_mock.generate_signals.return_value = mock_signals_df
+
+        tp_percentage = 0.02 
+        entry_price_expected = 99 
+        tp_price_expected = entry_price_expected * (1 + tp_percentage)
+
+        results = self.bot.backtest(
+            timeframe=Interval.in_1_hour, 
+            strategy_logic=strategy_mock,
+            initial_capital=10000,
+            bars=len(mock_price_df),
+            commission_bps=0,
+            sl_percentage=None, 
+            tp_percentage=tp_percentage
+        )
+
+        self.assertIsNotNone(results)
+        self.assertEqual(len(results['trade_log']), 1)
+        trade = results['trade_log'][0]
+
+        self.assertEqual(trade['entry_price'], entry_price_expected)
+        self.assertEqual(trade['exit_reason'], 'TP')
+        self.assertAlmostEqual(trade['exit_price'], tp_price_expected)
+
+        expected_shares = 10000 / entry_price_expected
+        expected_pnl = (tp_price_expected - entry_price_expected) * expected_shares
+        self.assertAlmostEqual(trade['pnl'], expected_pnl, places=2)
+        self.assertAlmostEqual(results['performance_metrics']['final_equity'], 10000 + expected_pnl, places=2)
+
+    @patch('bot.Bot.download')
+    def test_backtest_sl_takes_precedence_over_tp_on_same_bar(self, mock_download):
+        strategy_mock = MagicMock()
+        # Entry at open of index 1 (price 101). SL: 98.98. TP: 103.02.
+        # Bar 2 (idx=2) low is 97 (hits SL), high is 104 (hits TP). SL should take precedence.
+        data = { 
+            'open':  [100, 101, 98], 
+            'high':  [102, 102, 104], # Bar index 2 high (104)
+            'low':   [99,  100, 97],  # Bar index 2 low (97)
+            'close': [101, 100, 99],
+            'volume':[1000,1000,1000]
+        }
+        idx = pd.to_datetime([f'2023-01-01 0{i}:00:00' for i in range(len(data['open']))])
+        mock_price_df = pd.DataFrame(data, index=idx)
+        mock_download.return_value = mock_price_df
+
+        signals_data = {'signal': [1, 0, 0]} 
+        mock_signals_df = pd.DataFrame(signals_data, index=idx)
+        strategy_mock.generate_signals.return_value = mock_signals_df
+
+        sl_percentage = 0.02 
+        tp_percentage = 0.02
+        entry_price_expected = 101
+        sl_price_expected = entry_price_expected * (1 - sl_percentage)
+
+        results = self.bot.backtest(
+            timeframe=Interval.in_1_hour, 
+            strategy_logic=strategy_mock,
+            initial_capital=10000,
+            bars=len(mock_price_df),
+            commission_bps=0,
+            sl_percentage=sl_percentage,
+            tp_percentage=tp_percentage
+        )
+        self.assertEqual(len(results['trade_log']), 1)
+        trade = results['trade_log'][0]
+        self.assertEqual(trade['exit_reason'], 'SL') 
+        self.assertAlmostEqual(trade['exit_price'], sl_price_expected)
+
+    @patch('bot.Bot.download')
+    def test_backtest_sl_tp_takes_precedence_over_signal_exit(self, mock_download):
+        strategy_mock = MagicMock()
+        # Entry at open of index 1 (price 101). SL: 98.98.
+        # Bar 2 (idx=2) low is 97 (hits SL). Strategy also signals SELL at index 1 (for execution on open of index 2).
+        data = { 
+            'open':  [100, 101, 98], 
+            'high':  [102, 102, 99], 
+            'low':   [99,  100, 97],  
+            'close': [101, 100, 99],
+            'volume':[1000,1000,1000]
+        }
+        idx = pd.to_datetime([f'2023-01-01 0{i}:00:00' for i in range(len(data['open']))])
+        mock_price_df = pd.DataFrame(data, index=idx)
+        mock_download.return_value = mock_price_df
+        
+        signals_data = {'signal': [1, -1, 0]} # Buy at idx 0 (exec idx 1), Sell signal at idx 1 (exec idx 2)
+        mock_signals_df = pd.DataFrame(signals_data, index=idx)
+        strategy_mock.generate_signals.return_value = mock_signals_df
+
+        sl_percentage = 0.02 
+        entry_price_expected = 101
+        sl_price_expected = entry_price_expected * (1 - sl_percentage)
+
+        results = self.bot.backtest(
+            timeframe=Interval.in_1_hour, 
+            strategy_logic=strategy_mock,
+            initial_capital=10000,
+            bars=len(mock_price_df),
+            commission_bps=0,
+            sl_percentage=sl_percentage,
+            tp_percentage=None # No TP for this specific test
+        )
+        self.assertEqual(len(results['trade_log']), 1)
+        trade = results['trade_log'][0]
+        self.assertEqual(trade['exit_reason'], 'SL') 
+        self.assertAlmostEqual(trade['exit_price'], sl_price_expected)
+
 
 if __name__ == '__main__':
     unittest.main(argv=['first-arg-is-ignored'], exit=False)

@@ -93,6 +93,19 @@ class Bot:
         summary['total_winning_trades'] = len(winning_trades)
         summary['total_losing_trades'] = len(losing_trades)
 
+        # Add counts for different exit reasons
+        if trade_log: # Ensure trade_log is not empty
+            summary['sl_exits_count'] = sum(1 for t in trade_log if t.get('exit_reason') == 'SL')
+            summary['tp_exits_count'] = sum(1 for t in trade_log if t.get('exit_reason') == 'TP')
+            summary['signal_exits_count'] = sum(1 for t in trade_log if t.get('exit_reason') == 'Signal')
+            # Optional: count 'End of Data' exits if that's logged
+            summary['end_of_data_exits_count'] = sum(1 for t in trade_log if t.get('exit_reason') == 'End of Data')
+        else:
+            summary['sl_exits_count'] = 0
+            summary['tp_exits_count'] = 0
+            summary['signal_exits_count'] = 0
+            summary['end_of_data_exits_count'] = 0
+
         if summary['total_trades'] > 0:
             summary['win_rate_percentage'] = (summary['total_winning_trades'] / summary['total_trades']) * 100
         else:
@@ -255,7 +268,7 @@ class Bot:
         plt.grid(True)
         plt.show(block=True) # block=True for the last plot, or manage windows if preferred
 
-    def backtest(self, timeframe, strategy_logic, initial_capital=100000, bars=2000, commission_bps=0):
+    def backtest(self, timeframe, strategy_logic, initial_capital=100000, bars=2000, commission_bps=0, sl_percentage=None, tp_percentage=None):
         """
         Performs a backtest of a given strategy.
 
@@ -266,12 +279,14 @@ class Bot:
             initial_capital (float): The starting capital for the backtest.
             bars (int): The number of historical bars to download.
             commission_bps (float): Commission in basis points (e.g., 2 bps = 0.02% = 0.0002).
+            sl_percentage (float, optional): Stop loss percentage (e.g., 0.02 for 2%). Should be positive.
+            tp_percentage (float, optional): Take profit percentage (e.g., 0.05 for 5%). Should be positive.
 
         Returns:
             A dictionary containing the backtest results (trade log, equity curve, performance metrics),
             or None if data download fails or data is insufficient.
         """
-        print(f"Starting backtest for {self.symbol} on {timeframe}...")
+        print(f"Starting backtest for {self.symbol} on {timeframe} with SL: {sl_percentage*100 if sl_percentage and sl_percentage > 0 else 'N/A'}%, TP: {tp_percentage*100 if tp_percentage and tp_percentage > 0 else 'N/A'}%...")
         data_df = self.download(timeframe, bars)
 
         if data_df is None or data_df.empty:
@@ -304,97 +319,142 @@ class Bot:
         print(f"Data downloaded. Columns: {data_df.columns}. Length: {len(data_df)}. Starting simulation...")
 
         # Loop from the first bar up to len(data_df) - 2 to allow execution on data_df['open'].iloc[i+1]
-        for i in range(len(data_df) - 1): # Iterate up to second to last bar
-            current_signal = signals.iloc[i]
+        # The loop iterates up to `len(data_df) - 2` to ensure `data_df.iloc[i+1]` is always valid for price data.
+        # Equity curve is indexed up to `len(data_df) - 1`.
+        for i in range(len(data_df) - 1): 
             
-            # Determine execution price: open of NEXT bar. If last signal, no next bar for execution.
-            if i + 1 >= len(data_df):
-                if position_shares > 0 and active_trade is not None: # If holding shares, try to liquidate
-                    last_close_price = data_df['close'].iloc[i]
-                    price_after_commission = last_close_price * (1 - commission_bps / 10000.0)
-                    capital += position_shares * price_after_commission
-                    active_trade['exit_time'] = data_df.index[i]
-                    active_trade['exit_price'] = last_close_price
-                    active_trade['pnl'] = (active_trade['exit_price'] - active_trade['entry_price']) * active_trade['shares'] - \
-                                           (active_trade['entry_price'] * active_trade['shares'] * commission_bps / 10000.0) - \
-                                           (active_trade['exit_price'] * active_trade['shares'] * commission_bps / 10000.0)
-                    trade_log.append(active_trade)
-                    print(f"Liquidated open position at end of data (bar {i}): {active_trade['shares']} shares at {last_close_price}")
+            # --- SL/TP Check for active positions ---
+            # This check uses data from bar `i+1` (low/high) if a trade is active.
+            if position_shares > 0 and active_trade is not None:
+                current_bar_low = data_df['low'].iloc[i+1]
+                current_bar_high = data_df['high'].iloc[i+1]
+                sl_price_target = active_trade.get('sl_price')
+                tp_price_target = active_trade.get('tp_price')
+                
+                exit_price_sl_tp = 0
+                exit_reason_sl_tp = None
+
+                # Check Stop Loss first
+                if sl_price_target is not None and sl_percentage > 0 and current_bar_low <= sl_price_target:
+                    exit_price_sl_tp = sl_price_target # Execute at SL price
+                    exit_reason_sl_tp = 'SL'
+                    print(f"Trade SL hit at {data_df.index[i+1]} for {self.symbol}: Target {sl_price_target:.2f}, Bar Low {current_bar_low:.2f}")
+                
+                # Check Take Profit if SL not hit
+                elif tp_price_target is not None and tp_percentage > 0 and current_bar_high >= tp_price_target:
+                    exit_price_sl_tp = tp_price_target # Execute at TP price
+                    exit_reason_sl_tp = 'TP'
+                    print(f"Trade TP hit at {data_df.index[i+1]} for {self.symbol}: Target {tp_price_target:.2f}, Bar High {current_bar_high:.2f}")
+
+                if exit_reason_sl_tp:
+                    capital += position_shares * exit_price_sl_tp 
+                    commission_exit_cost = position_shares * exit_price_sl_tp * (commission_bps / 10000.0)
+                    
+                    active_trade_log_entry = active_trade.copy() # Use copy for logging
+                    active_trade_log_entry['exit_time'] = data_df.index[i+1]
+                    active_trade_log_entry['exit_price'] = exit_price_sl_tp
+                    active_trade_log_entry['exit_reason'] = exit_reason_sl_tp
+                    active_trade_log_entry['pnl'] = ((active_trade_log_entry['exit_price'] - active_trade_log_entry['entry_price']) * active_trade_log_entry['shares']) - \
+                                                    active_trade_log_entry['commission_entry_cost'] - commission_exit_cost
+                    trade_log.append(active_trade_log_entry)
+                    print(f"Trade closed by {exit_reason_sl_tp} for {self.symbol} at {exit_price_sl_tp:.2f}, PnL: {active_trade_log_entry['pnl']:.2f}")
+                    
                     position_shares = 0
                     active_trade = None
-                equity.iloc[i] = capital # Update final equity point based on last capital
-                break # Exit loop as no further bars to process or execute on
+                    equity.iloc[i+1] = capital # Update equity based on closed trade
+                    continue # Move to next bar after SL/TP exit
 
-            execution_price = data_df['open'].iloc[i+1] # Execute on next bar's open
+            # --- Strategy-based Entry/Exit ---
+            # If no SL/TP exit, proceed with strategy signals. Signal from bar `i` executes on open of bar `i+1`.
+            strategy_execution_price = data_df['open'].iloc[i+1]
+            current_signal = signals.iloc[i] 
 
-            # Buy Signal
+            # Buy Signal (if no position)
             if current_signal == 1 and position_shares == 0:
-                cost_per_share = execution_price * (1 + commission_bps / 10000.0)
-                if cost_per_share <= 0: # Avoid division by zero or negative price
-                    print(f"Warning: Invalid execution price or commission for buy at bar {i+1}: {cost_per_share}")
-                    equity.iloc[i+1] = capital # No trade, equity is current capital
+                cost_per_share = strategy_execution_price * (1 + commission_bps / 10000.0)
+                if cost_per_share <= 0: 
+                    print(f"Warning: Invalid execution price or commission for buy at bar {i+1} for {self.symbol}: {cost_per_share}")
+                    equity.iloc[i+1] = capital 
                     continue 
                 shares_to_buy = capital / cost_per_share
                 position_shares = shares_to_buy
-                capital -= position_shares * execution_price # Actual capital deduction before commission for PnL calc later
+                capital -= position_shares * strategy_execution_price 
                 
                 active_trade = {
                     'entry_time': data_df.index[i+1], 
-                    'entry_price': execution_price, 
+                    'entry_price': strategy_execution_price, 
                     'shares': position_shares, 
                     'type': 'long',
-                    'commission_entry_cost': position_shares * execution_price * (commission_bps / 10000.0)
+                    'commission_entry_cost': position_shares * strategy_execution_price * (commission_bps / 10000.0),
+                    'sl_price': None, 
+                    'tp_price': None,
+                    'exit_reason': None # Initialize exit_reason
                 }
-                print(f"Trade opened at {data_df.index[i+1]}: BUY {shares_to_buy:.2f} shares at {execution_price:.2f}")
 
-            # Sell Signal (to close long position)
-            elif current_signal == -1 and position_shares > 0 and active_trade is not None:
-                proceeds_per_share = execution_price * (1 - commission_bps / 10000.0)
-                capital += position_shares * execution_price # Actual capital addition before commission for PnL calc
-
-                commission_exit_cost = position_shares * execution_price * (commission_bps / 10000.0)
-                active_trade['exit_time'] = data_df.index[i+1]
-                active_trade['exit_price'] = execution_price
-                active_trade['pnl'] = ((active_trade['exit_price'] - active_trade['entry_price']) * active_trade['shares']) - \
-                                       active_trade['commission_entry_cost'] - commission_exit_cost
+                if sl_percentage is not None and sl_percentage > 0:
+                    active_trade['sl_price'] = active_trade['entry_price'] * (1 - sl_percentage)
+                if tp_percentage is not None and tp_percentage > 0:
+                    active_trade['tp_price'] = active_trade['entry_price'] * (1 + tp_percentage)
                 
-                trade_log.append(active_trade)
-                print(f"Trade closed at {data_df.index[i+1]}: SELL {active_trade['shares']:.2f} shares at {execution_price:.2f}, PnL: {active_trade['pnl']:.2f}")
+                print(f"Trade opened at {data_df.index[i+1]} for {self.symbol}: BUY {shares_to_buy:.2f} shares at {strategy_execution_price:.2f}. SL: {active_trade.get('sl_price')}, TP: {active_trade.get('tp_price')}")
+                # Mark-to-market equity for the new position at the close of the entry bar (i+1)
+                equity.iloc[i+1] = capital + position_shares * data_df['close'].iloc[i+1]
+                continue 
+
+            # Strategy Sell Signal (to close long position, only if no SL/TP exit occurred)
+            elif current_signal == -1 and position_shares > 0 and active_trade is not None:
+                capital += position_shares * strategy_execution_price 
+                commission_exit_cost = position_shares * strategy_execution_price * (commission_bps / 10000.0)
+                
+                active_trade_log_entry = active_trade.copy() # Use copy for logging
+                active_trade_log_entry['exit_time'] = data_df.index[i+1]
+                active_trade_log_entry['exit_price'] = strategy_execution_price
+                active_trade_log_entry['exit_reason'] = 'Signal' # Set exit reason
+                active_trade_log_entry['pnl'] = ((active_trade_log_entry['exit_price'] - active_trade_log_entry['entry_price']) * active_trade_log_entry['shares']) - \
+                                                active_trade_log_entry['commission_entry_cost'] - commission_exit_cost
+                
+                trade_log.append(active_trade_log_entry)
+                print(f"Trade closed by Signal at {data_df.index[i+1]} for {self.symbol}: SELL {active_trade_log_entry['shares']:.2f} shares at {strategy_execution_price:.2f}, PnL: {active_trade_log_entry['pnl']:.2f}")
                 position_shares = 0
                 active_trade = None
+                equity.iloc[i+1] = capital 
+                continue 
             
-            # Update equity
-            if i + 1 < len(data_df): # Ensure index is within bounds
-                if position_shares > 0:
-                    equity.iloc[i+1] = capital + position_shares * data_df['close'].iloc[i+1] # Mark-to-market
-                else:
+            # If no trade action on this bar (no entry, no exit by SL/TP/Signal)
+            # Update equity based on current state
+            if i + 1 < len(data_df): 
+                if position_shares > 0 and active_trade is not None: # Holding position
+                    equity.iloc[i+1] = capital + position_shares * data_df['close'].iloc[i+1] # MTM
+                else: # No position
                     equity.iloc[i+1] = capital
-            elif i < len(equity): # last point if loop ends due to i+1 out of bounds
-                 equity.iloc[i] = capital
-
+            # If i is the last iteration (len(data_df)-2), then i+1 is the last bar (len(data_df)-1).
+            # equity.iloc[len(data_df)-1] is the last point to be updated.
 
         # Fill any NaNs in equity curve (e.g., if loop didn't run fully or first bar)
-        equity = equity.ffill().bfill() # Forward fill then backward fill for safety
-        if equity.iloc[0] != initial_capital and pd.isna(equity.iloc[0]): # if first is still NaN
+        equity = equity.ffill().bfill() 
+        if equity.iloc[0] != initial_capital and pd.isna(equity.iloc[0]): 
              equity.iloc[0] = initial_capital
 
 
         # Final liquidation if position is still open after the loop
         if position_shares > 0 and active_trade is not None:
-            last_close_price = data_df['close'].iloc[-1] # Use the very last close price
-            # Simulate commission for liquidation
-            commission_exit_cost = position_shares * last_close_price * (commission_bps / 10000.0)
-            capital += position_shares * last_close_price # Add proceeds to capital
+            last_close_price = data_df['close'].iloc[-1] 
+            capital += position_shares * last_close_price 
+            
+            final_commission_cost = position_shares * last_close_price * (commission_bps / 10000.0)
 
-            active_trade['exit_time'] = data_df.index[-1]
-            active_trade['exit_price'] = last_close_price
-            active_trade['pnl'] = ((active_trade['exit_price'] - active_trade['entry_price']) * active_trade['shares']) - \
-                                   active_trade['commission_entry_cost'] - commission_exit_cost
-            trade_log.append(active_trade)
-            print(f"Position liquidated at end of data: SELL {active_trade['shares']:.2f} shares at {last_close_price:.2f}, PnL: {active_trade['pnl']:.2f}")
-            position_shares = 0 # Reset position
+            active_trade_log_entry = active_trade.copy() # Use copy for logging
+            active_trade_log_entry['exit_time'] = data_df.index[-1]
+            active_trade_log_entry['exit_price'] = last_close_price
+            active_trade_log_entry['exit_reason'] = 'End of Data' # Set exit reason
+            active_trade_log_entry['pnl'] = ((active_trade_log_entry['exit_price'] - active_trade_log_entry['entry_price']) * active_trade_log_entry['shares']) - \
+                                            active_trade_log_entry['commission_entry_cost'] - final_commission_cost
+            
+            trade_log.append(active_trade_log_entry)
+            print(f"Position liquidated at end of data for {self.symbol}: SELL {active_trade_log_entry['shares']:.2f} shares at {last_close_price:.2f}, PnL: {active_trade_log_entry['pnl']:.2f}")
+            position_shares = 0 
             active_trade = None
-            equity.iloc[-1] = capital # Update last equity point
+            equity.iloc[-1] = capital 
 
 
         final_equity = equity.iloc[-1] if not equity.empty else initial_capital
@@ -473,7 +533,7 @@ class SimpleMACrossoverStrategy:
         return signals
 
     def grid_search_optimize(self, timeframe, strategy_class, parameter_grid, metric_to_optimize, 
-                             initial_capital=100000, bars=2000, commission_bps=0):
+                             initial_capital=100000, bars=2000, commission_bps=0, sl_percentage=None, tp_percentage=None):
         """
         Performs a grid search to find the optimal parameters for a strategy.
 
@@ -531,7 +591,9 @@ class SimpleMACrossoverStrategy:
                     strategy_logic=strategy_instance,
                     initial_capital=initial_capital,
                     bars=bars,
-                    commission_bps=commission_bps
+                    commission_bps=commission_bps,
+                    sl_percentage=sl_percentage, # Pass through
+                    tp_percentage=tp_percentage  # Pass through
                 )
 
                 if backtest_results:
@@ -589,6 +651,7 @@ if __name__ == '__main__':
 
     print(f"Attempting to run example for: {example_symbol}, {example_exchange}, {example_timeframe.value}")
     print(f"Initial capital: {initial_capital_example}, Commission: {commission_bps_example} bps")
+    print(f"SL: 2.00%, TP: 4.00%") 
     print("Note: Data download via TvDatafeed might require user login or specific setup.")
     print("If the script hangs or fails at data download, check your TvDatafeed configuration.")
 
@@ -621,7 +684,9 @@ if __name__ == '__main__':
             strategy_logic=strategy,
             initial_capital=initial_capital_example,
             bars=500, # Number of bars for the backtest
-            commission_bps=commission_bps_example
+            commission_bps=commission_bps_example,
+            sl_percentage=0.02, # Added
+            tp_percentage=0.04  # Added
         )
         print("Backtest method called.")
 
@@ -657,12 +722,14 @@ if __name__ == '__main__':
         # This will result in 2x2 = 4 combinations: (10,25), (10,35), (15,25), (15,35)
         # We must ensure that for all combinations, short_window < long_window.
         # The SimpleMACrossoverStrategy constructor already raises ValueError if short_window >= long_window.
+        # The SimpleMACrossoverStrategy constructor already raises ValueError if short_window >= long_window.
         # The grid_search_optimize method will catch this exception for invalid combos.
 
         metric_to_optimize_example = 'sharpe_ratio_period' # e.g., 'total_pnl', 'sharpe_ratio_period', 'profit_factor'
         
         print(f"Parameter grid for optimization: {parameter_grid_example}")
         print(f"Metric to optimize: {metric_to_optimize_example}")
+        print(f"Using fixed SL: 2.50%, fixed TP: 5.00% for all grid search combinations.")
 
         # 6. Run Grid Search Optimization
         # Using fewer bars (e.g., 300) for the optimization example to make it run faster.
@@ -673,7 +740,9 @@ if __name__ == '__main__':
             metric_to_optimize=metric_to_optimize_example,
             initial_capital=initial_capital_example,
             bars=300, # Fewer bars for quicker optimization in example
-            commission_bps=commission_bps_example
+            commission_bps=commission_bps_example,
+            sl_percentage=0.025, # Example: Fixed 2.5% SL for this optimization run
+            tp_percentage=0.05   # Example: Fixed 5% TP for this optimization run
         )
 
         # 7. Print Optimization Results
