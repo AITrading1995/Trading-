@@ -2,6 +2,7 @@ from tvdatafeed import TvDatafeed, Interval # Assuming Interval is needed based 
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import itertools
 # We will add matplotlib.pyplot later when implementing plotting features
 
 class Bot:
@@ -471,6 +472,102 @@ class SimpleMACrossoverStrategy:
         # print(signals.tail())
         return signals
 
+    def grid_search_optimize(self, timeframe, strategy_class, parameter_grid, metric_to_optimize, 
+                             initial_capital=100000, bars=2000, commission_bps=0):
+        """
+        Performs a grid search to find the optimal parameters for a strategy.
+
+        Args:
+            timeframe: The timeframe for backtesting (e.g., Interval.in_1_hour).
+            strategy_class: The class of the strategy to optimize (e.g., SimpleMACrossoverStrategy).
+            parameter_grid (dict): A dictionary where keys are parameter names and values are lists of
+                                   parameter values to test (e.g., {'short_window': [10, 20], 'long_window': [30, 40]}).
+            metric_to_optimize (str): The key from the summary report to maximize (e.g., 'total_pnl', 'sharpe_ratio_period').
+            initial_capital (float): Starting capital for each backtest.
+            bars (int): Number of historical bars for each backtest.
+            commission_bps (float): Commission in basis points.
+
+        Returns:
+            A tuple containing:
+                - best_params (dict): The dictionary of parameters that yielded the best performance.
+                - best_score (float): The score of the specified metric for the best parameters.
+                - all_results (list): A list of dictionaries, each containing 'params' and 'score'.
+                                      Returns None if no valid results were found.
+        """
+        if not parameter_grid:
+            print("Error: Parameter grid is empty.")
+            return None, -float('inf'), []
+
+        param_names = list(parameter_grid.keys())
+        param_values = list(parameter_grid.values())
+        
+        all_combinations = list(itertools.product(*param_values))
+        
+        if not all_combinations:
+            print("Error: No parameter combinations generated from the grid.")
+            return None, -float('inf'), []
+
+        print(f"Starting grid search for {len(all_combinations)} parameter combinations...")
+        print(f"Optimizing for metric: {metric_to_optimize}")
+
+        best_params = None
+        # Initialize best_score to negative infinity, as we want to maximize the metric.
+        # If a metric could be negative (like PnL), this is appropriate.
+        # If optimizing a metric that should always be positive (e.g. win rate), 0 might be an alternative start.
+        best_score = -float('inf') 
+        all_results = []
+
+        for i, combo in enumerate(all_combinations):
+            current_params = dict(zip(param_names, combo))
+            print(f"\nRunning combination {i+1}/{len(all_combinations)}: {current_params}")
+
+            try:
+                # 1. Instantiate strategy with current parameters
+                strategy_instance = strategy_class(**current_params)
+                
+                # 2. Run backtest
+                backtest_results = self.backtest(
+                    timeframe=timeframe,
+                    strategy_logic=strategy_instance,
+                    initial_capital=initial_capital,
+                    bars=bars,
+                    commission_bps=commission_bps
+                )
+
+                if backtest_results:
+                    # 3. Generate summary report
+                    summary_report = self.generate_summary_report(backtest_results)
+                    
+                    if summary_report and metric_to_optimize in summary_report:
+                        current_score = summary_report[metric_to_optimize]
+                        print(f"Params: {current_params}, Score ({metric_to_optimize}): {current_score:.4f}")
+                        
+                        result_entry = {'params': current_params.copy(), 'score': current_score, 'summary': summary_report}
+                        all_results.append(result_entry)
+
+                        if current_score > best_score:
+                            best_score = current_score
+                            best_params = current_params.copy()
+                            print(f"*** New best score found: {best_score:.4f} with params: {best_params} ***")
+                    else:
+                        print(f"Warning: Metric '{metric_to_optimize}' not found in summary report for params {current_params} or report failed.")
+                        all_results.append({'params': current_params.copy(), 'score': -float('inf'), 'summary': None, 'error': f'Metric {metric_to_optimize} not found or report failed'})
+
+                else:
+                    print(f"Warning: Backtest failed for params {current_params}. Skipping this combination.")
+                    all_results.append({'params': current_params.copy(), 'score': -float('inf'), 'summary': None, 'error': 'Backtest failed'})
+
+            except Exception as e:
+                print(f"Exception during combination {current_params}: {e}")
+                all_results.append({'params': current_params.copy(), 'score': -float('inf'), 'summary': None, 'error': str(e)})
+        
+        if best_params is None:
+            print("\nGrid search completed. No valid results found or all backtests failed.")
+        else:
+            print(f"\nGrid search completed. Best parameters: {best_params} with {metric_to_optimize}: {best_score:.4f}")
+            
+        return best_params, best_score, all_results
+
 if __name__ == '__main__':
     print("Starting Bot example execution...")
 
@@ -545,6 +642,57 @@ if __name__ == '__main__':
             print("Plotting completed. Check for plot windows.")
         else:
             print("Backtest did not return results. Check logs for errors (e.g., data download issues).")
+
+        # ... (keep existing single backtest example code here up to "Plotting completed.") ...
+        # print("Plotting completed. Check for plot windows.") # From previous example part
+
+        print("\n\n--- Starting Grid Search Optimization Example ---")
+        # 5. Define Parameter Grid for Optimization
+        # Using smaller ranges and fewer bars for a quicker example.
+        # Ensure short_window < long_window in your grid to be logical for MACrossover.
+        parameter_grid_example = {
+            'short_window': [10, 15], # Example: test short windows 10 and 15
+            'long_window': [25, 35]   # Example: test long windows 25 and 35
+        }
+        # This will result in 2x2 = 4 combinations: (10,25), (10,35), (15,25), (15,35)
+        # We must ensure that for all combinations, short_window < long_window.
+        # The SimpleMACrossoverStrategy constructor already raises ValueError if short_window >= long_window.
+        # The grid_search_optimize method will catch this exception for invalid combos.
+
+        metric_to_optimize_example = 'sharpe_ratio_period' # e.g., 'total_pnl', 'sharpe_ratio_period', 'profit_factor'
+        
+        print(f"Parameter grid for optimization: {parameter_grid_example}")
+        print(f"Metric to optimize: {metric_to_optimize_example}")
+
+        # 6. Run Grid Search Optimization
+        # Using fewer bars (e.g., 300) for the optimization example to make it run faster.
+        best_params, best_score, all_optimization_results = my_bot.grid_search_optimize(
+            timeframe=example_timeframe,
+            strategy_class=SimpleMACrossoverStrategy, # Pass the class itself
+            parameter_grid=parameter_grid_example,
+            metric_to_optimize=metric_to_optimize_example,
+            initial_capital=initial_capital_example,
+            bars=300, # Fewer bars for quicker optimization in example
+            commission_bps=commission_bps_example
+        )
+
+        # 7. Print Optimization Results
+        if best_params:
+            print("\n--- Grid Search Optimization Results ---")
+            print(f"Best parameters found: {best_params}")
+            print(f"Best {metric_to_optimize_example}: {best_score:.4f}")
+            
+            # Optionally, print details of all combinations tested
+            # print("\nDetails of all combinations tested in optimization:")
+            # for res in all_optimization_results:
+            #     print(f"Params: {res['params']}, Score: {res.get('score', 'N/A')}, Error: {res.get('error', 'None')}")
+            #     # If you want to see the full summary for each:
+            #     # if res.get('summary'):
+            #     #     print("Summary:")
+            #     #     for k, v in res['summary'].items():
+            #     #         print(f"  {k}: {v}")
+        else:
+            print("\nGrid search optimization did not find any valid results or all combinations failed.")
 
     except ImportError as e:
         print(f"ImportError: {e}. Please ensure all required libraries (tvdatafeed, pandas, numpy, matplotlib) are installed.")

@@ -190,6 +190,101 @@ class TestBot(unittest.TestCase):
         # Max drawdown: peak 11000, valley 10800. Drawdown = (10800-11000)/11000 = -200/11000
         self.assertAlmostEqual(summary['max_drawdown_percentage'], (-200/11000)*100, places=2)
 
+    @patch('bot.Bot.generate_summary_report')
+    @patch('bot.Bot.backtest')
+    def test_grid_search_optimize(self, mock_backtest, mock_generate_summary_report):
+        # 1. Define a simple strategy class for testing (or use SimpleMACrossoverStrategy if its __init__ is simple)
+        class MockStrategy:
+            def __init__(self, param1=None, param2=None):
+                self.param1 = param1
+                self.param2 = param2
+                # print(f"MockStrategy instantiated with param1={param1}, param2={param2}") # For debugging test
+
+            def generate_signals(self, df):
+                # Not actually called if backtest is properly mocked, but good practice to have it.
+                return pd.DataFrame({'signal': [0] * len(df)}, index=df.index)
+
+        # 2. Define parameter grid and metric
+        parameter_grid = {
+            'param1': [1, 2],
+            'param2': ['a', 'b']
+        }
+        metric_to_optimize = 'total_pnl'
+
+        # 3. Define side effects for mock_backtest and mock_generate_summary_report
+        def summary_report_side_effect(backtest_results_arg):
+            params_from_backtest = backtest_results_arg.get('params_for_score', {})
+            p1 = params_from_backtest.get('param1')
+            p2 = params_from_backtest.get('param2')
+
+            if p1 == 1 and p2 == 'a':
+                return {'total_pnl': 100, 'sharpe_ratio_period': 1.0}
+            elif p1 == 1 and p2 == 'b':
+                return {'total_pnl': 150, 'sharpe_ratio_period': 1.2} # This should be the best for total_pnl
+            elif p1 == 2 and p2 == 'a':
+                return {'total_pnl': 120, 'sharpe_ratio_period': 0.8}
+            elif p1 == 2 and p2 == 'b':
+                return {'total_pnl': 80, 'sharpe_ratio_period': 0.5}
+            return {'total_pnl': 0, 'sharpe_ratio_period': 0} 
+
+        mock_generate_summary_report.side_effect = summary_report_side_effect
+        
+        def backtest_side_effect(timeframe, strategy_logic, initial_capital, bars, commission_bps):
+            return {
+                'performance_metrics': {}, 
+                'trade_log': [], 
+                'equity_curve': pd.Series(dtype=float), 
+                'params_for_score': {'param1': strategy_logic.param1, 'param2': strategy_logic.param2}
+            }
+        mock_backtest.side_effect = backtest_side_effect
+        
+        # 4. Run grid_search_optimize
+        best_params, best_score, all_results = self.bot.grid_search_optimize(
+            timeframe=Interval.in_1_hour, 
+            strategy_class=MockStrategy,
+            parameter_grid=parameter_grid,
+            metric_to_optimize=metric_to_optimize,
+            initial_capital=10000, 
+            bars=100, 
+            commission_bps=0 
+        )
+
+        # 5. Assertions
+        self.assertIsNotNone(best_params)
+        self.assertEqual(best_params, {'param1': 1, 'param2': 'b'})
+        self.assertEqual(best_score, 150)
+        self.assertEqual(len(all_results), 4) 
+
+        best_result_in_all = next(r for r in all_results if r['params'] == best_params)
+        self.assertEqual(best_result_in_all['summary']['sharpe_ratio_period'], 1.2)
+
+
+    @patch('bot.Bot.generate_summary_report')
+    @patch('bot.Bot.backtest')
+    def test_grid_search_optimize_metric_not_found(self, mock_backtest, mock_generate_summary_report):
+        class MockStrategy:
+            def __init__(self, param1=None): self.param1 = param1
+            def generate_signals(self, df): return pd.DataFrame({'signal': [0]*len(df)}, index=df.index)
+
+        parameter_grid = {'param1': [1]}
+        metric_to_optimize = 'non_existent_metric' 
+
+        mock_backtest.return_value = {'params_for_score': {'param1': 1}} 
+        mock_generate_summary_report.return_value = {'total_pnl': 100} 
+
+        best_params, best_score, all_results = self.bot.grid_search_optimize(
+            timeframe=Interval.in_1_hour,
+            strategy_class=MockStrategy,
+            parameter_grid=parameter_grid,
+            metric_to_optimize=metric_to_optimize,
+        )
+        
+        self.assertIsNone(best_params) 
+        self.assertEqual(best_score, -float('inf')) 
+        self.assertEqual(len(all_results), 1)
+        self.assertTrue('error' in all_results[0])
+        self.assertIn(f'Metric {metric_to_optimize} not found', all_results[0]['error'])
+
 
 if __name__ == '__main__':
     unittest.main(argv=['first-arg-is-ignored'], exit=False)

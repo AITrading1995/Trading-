@@ -125,6 +125,72 @@ if backtest_results:
     # This will display the equity curve and price chart with trades.
 ```
 
+### Grid Search Optimization for Strategies
+
+The `Bot` class includes a `grid_search_optimize` method to help find the best parameters for your trading strategy based on a chosen performance metric.
+
+```python
+# Method signature:
+# bot.grid_search_optimize(timeframe, strategy_class, parameter_grid, metric_to_optimize, 
+#                          initial_capital=100000, bars=2000, commission_bps=0)
+```
+
+**How it Works:**
+
+1.  **Define a Parameter Grid**: You provide a dictionary (`parameter_grid`) where keys are the names of the parameters in your strategy's `__init__` method, and values are lists of the values you want to test for those parameters.
+2.  **Choose a Metric**: Specify which metric from the backtest summary report you want to maximize (e.g., `'total_pnl'`, `'sharpe_ratio_period'`, `'profit_factor'`).
+3.  **Iteration**: The method iterates through all possible combinations of the parameters in your grid.
+4.  **Backtesting**: For each combination, it instantiates your strategy with those parameters and runs a full backtest.
+5.  **Evaluation**: It records the chosen performance metric for each parameter set.
+6.  **Results**: It returns the parameter combination that yielded the highest score for your chosen metric, along with the score itself and a list containing results for all tested combinations.
+
+**Example of `parameter_grid` and Usage:**
+
+Let's assume you have a `SimpleMACrossoverStrategy` (like the one in `bot.py`) that takes `short_window` and `long_window` as parameters.
+
+```python
+# 1. (Bot and Strategy already instantiated or defined)
+# bot = Bot(symbol='ETH/USD', exchange='COINBASE')
+# strategy_class = SimpleMACrossoverStrategy # Pass the class, not an instance
+
+# 2. Define the parameter grid
+param_grid = {
+    'short_window': [10, 15, 20],
+    'long_window': [30, 40, 50] 
+}
+# This grid will test 3x3 = 9 combinations.
+# Ensure that parameter constraints (e.g., short_window < long_window) are handled
+# either by careful grid definition or within the strategy's __init__.
+# The SimpleMACrossoverStrategy in bot.py checks this.
+
+# 3. Choose the metric to optimize
+metric = 'sharpe_ratio_period'
+
+# 4. Run optimization
+best_params, best_score, all_results = bot.grid_search_optimize(
+    timeframe=Interval.in_1_hour,
+    strategy_class=SimpleMACrossoverStrategy,
+    parameter_grid=param_grid,
+    metric_to_optimize=metric,
+    initial_capital=10000.0,
+    bars=500, # Use a reasonable number of bars for optimization speed
+    commission_bps=2.0
+)
+
+# 5. Review results
+if best_params:
+    print(f"Best parameters found: {best_params}")
+    print(f"Best {metric}: {best_score:.4f}")
+    # all_results contains a list of dicts with {'params': ..., 'score': ..., 'summary': ...} for each combo
+else:
+    print("Grid search did not yield any valid results.")
+
+```
+**Important Considerations for Grid Search:**
+*   **Computational Cost**: Grid search can be computationally expensive, as it runs a full backtest for every parameter combination. Be mindful of the size of your parameter grid and the number of bars used for backtesting.
+*   **Overfitting**: Optimizing parameters too closely to historical data can lead to overfitting, where the strategy performs well on past data but poorly on new, unseen data. It's good practice to validate optimized parameters on out-of-sample data.
+*   **Parameter Constraints**: Ensure logical constraints between parameters (e.g., `short_window` < `long_window`) are either managed by your grid definition or handled within your strategy's initialization to avoid errors or illogical tests.
+
 ## Example Usage
 
 The `bot.py` script includes a runnable example in its `if __name__ == '__main__':` block. This example uses a `SimpleMACrossoverStrategy` (also defined in `bot.py`) to demonstrate the full workflow:
