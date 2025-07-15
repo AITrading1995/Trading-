@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Journal - Statistics</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>Trading Journal</h1>
+        <nav>
+            <ul>
+                <li><a href="index.html">Dashboard</a></li>
+                <li><a href="trade-log.html">Trade Log</a></li>
+                <li><a href="statistics.html">Statistics</a></li>
+                <li><a href="settings.html">Settings</a></li>
+            </ul>
+        </nav>
+    </header>
+    <main>
+        <section class="statistics-summary">
+            <h2>Advanced Statistics</h2>
+            <div id="statistics-container">
+                <!-- Advanced statistics will be populated here by JavaScript -->
+            </div>
+            <div class="chart-container">
+                <h3>Performance Plot</h3>
+                <canvas id="performance-plot"></canvas>
+            </div>
+        </section>
+    </main>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
